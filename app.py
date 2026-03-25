@@ -3,108 +3,119 @@ from docxtpl import DocxTemplate
 from openai import OpenAI
 import json
 import io
+import os
+import tempfile
+from pdf2docx import Converter
 
-# --- 1. CONFIGURATION DE LA PAGE ---
-st.set_page_config(page_title="ContractAI SaaS", page_icon="📝")
-st.title("📝 Générateur de Contrats par IA")
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="ContractAI Pro", page_icon="⚖️")
+st.title("⚖️ Générateur de Contrats (Word & PDF)")
 
-# --- 2. SÉCURITÉ ET CLÉ API ---
-st.sidebar.markdown("### ⚙️ Configuration")
-API_KEY = st.sidebar.text_input("Votre clé API OpenAI (sk-...)", type="password")
-st.sidebar.info("Cette clé n'est pas sauvegardée. Elle sert uniquement à générer ce contrat.")
+# Récupération de la clé API depuis le serveur (Railway) invisible pour l'utilisateur
+API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# --- 3. FONCTION IA ---
+if not API_KEY:
+    st.error("🚨 Erreur Serveur : La clé API OpenAI n'est pas configurée sur Railway.")
+    st.stop()
+
+# --- 2. FONCTION INTELLIGENCE ARTIFICIELLE ---
 def analyser_variables_avec_ia(variables_trouvees):
-    """L'IA analyse les balises trouvées et crée la structure du formulaire"""
     client = OpenAI(api_key=API_KEY)
-    
     prompt = f"""
-    Tu es un assistant juridique expert en automatisation.
-    Voici une liste de variables extraites d'un modèle de contrat Word : {list(variables_trouvees)}.
-    Tu dois générer un formulaire pour l'utilisateur. 
-    Renvoie UNIQUEMENT un objet JSON valide avec cette structure stricte :
+    Tu es un assistant juridique. Voici les variables d'un contrat : {list(variables_trouvees)}.
+    Génère un formulaire JSON strict :
     {{"champs":[
-        {{"variable_exacte": "Nom_Client", "label_joli": "Nom complet du client", "type": "text"}},
-        {{"variable_exacte": "Montant", "label_joli": "Montant total (€)", "type": "number"}},
-        {{"variable_exacte": "Date_Debut", "label_joli": "Date de début du contrat", "type": "date"}}
+        {{"variable_exacte": "Nom", "label_joli": "Nom complet", "type": "text"}}
     ]}}
     """
-    
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"}
     )
-    
     resultat = json.loads(response.choices[0].message.content)
     return resultat.get("champs",[])
 
-# --- 4. INTERFACE UTILISATEUR ---
-st.markdown("### Étape 1 : Uploadez votre modèle Word (.docx)")
-st.info("💡 Astuce : Dans votre document Word, placez les éléments variables entre doubles accolades, par exemple : {{Nom_Entreprise}} ou {{Prix_Prestation}}.")
+# --- 3. INTERFACE UTILISATEUR ---
+st.markdown("### Étape 1 : Importez votre modèle")
+st.info("💡 Formats acceptés : .docx et .pdf. Placez vos variables entre {{...}} dans le document.")
 
-fichier_upload = st.file_uploader("Glissez votre contrat ici", type=["docx"])
+fichier_upload = st.file_uploader("Glissez votre contrat ici", type=["docx", "pdf"])
 
 if fichier_upload is not None:
-    if not API_KEY:
-        st.error("⚠️ Veuillez entrer votre clé API OpenAI dans la barre latérale à gauche pour continuer.")
-        st.stop()
-
-    # Lecture du document et extraction des variables {{...}}
-    try:
-        doc = DocxTemplate(fichier_upload)
-        variables_detectees = doc.get_undeclared_template_variables()
-    except Exception as e:
-        st.error("Erreur lors de la lecture du fichier Word. Assurez-vous qu'il s'agit bien d'un .docx valide.")
-        st.stop()
+    variables_detectees =[]
+    doc = None
+    
+    with st.spinner("Analyse du document en cours..."):
+        try:
+            # SI C'EST UN WORD (.docx)
+            if fichier_upload.name.endswith('.docx'):
+                file_bytes = fichier_upload.read()
+                fichier_en_memoire = io.BytesIO(file_bytes)
+                doc = DocxTemplate(fichier_en_memoire)
+                variables_detectees = doc.get_undeclared_template_variables()
+                
+            # SI C'EST UN PDF (.pdf)
+            elif fichier_upload.name.endswith('.pdf'):
+                st.toast("Conversion du PDF en cours...")
+                # On sauvegarde le PDF temporairement
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                    tmp_pdf.write(fichier_upload.read())
+                    pdf_path = tmp_pdf.name
+                
+                # On le convertit en Word en arrière-plan
+                docx_path = pdf_path.replace(".pdf", ".docx")
+                cv = Converter(pdf_path)
+                cv.convert(docx_path)
+                cv.close()
+                
+                # On charge le nouveau document converti
+                doc = DocxTemplate(docx_path)
+                variables_detectees = doc.get_undeclared_template_variables()
+                
+        except Exception as e:
+            st.error(f"❌ Erreur lors de la lecture : {e}")
+            st.stop()
 
     if not variables_detectees:
-        st.warning("⚠️ Aucune balise (ex: {{Nom}}) n'a été trouvée dans votre document.")
+        st.warning("⚠️ Aucune balise (ex: {{Nom}}) trouvée. Si c'est un PDF, assurez-vous que le texte est bien lisible.")
         st.stop()
 
-    # Appel à l'IA pour générer le formulaire (on sauvegarde dans session_state pour ne pas recharger l'IA)
-    with st.spinner("🧠 L'IA analyse votre contrat et prépare le formulaire..."):
+    # --- 4. CRÉATION DU FORMULAIRE ---
+    with st.spinner("🧠 L'IA prépare votre formulaire..."):
         if "formulaire_ia" not in st.session_state:
-            try:
-                st.session_state.formulaire_ia = analyser_variables_avec_ia(variables_detectees)
-            except Exception as e:
-                st.error(f"Erreur avec l'API OpenAI. Vérifiez votre clé. Détail : {e}")
-                st.stop()
+            st.session_state.formulaire_ia = analyser_variables_avec_ia(variables_detectees)
 
-    # Affichage du formulaire généré
-    st.markdown("### Étape 2 : Remplissez les informations")
+    st.markdown("### Étape 2 : Remplissez les champs")
     
-    with st.form("formulaire_contrat"):
-        reponses_utilisateur = {}
-        
-        # On crée un champ dynamique pour chaque variable trouvée par l'IA
+    with st.form("form_contrat"):
+        reponses = {}
         for champ in st.session_state.formulaire_ia:
-            var_nom = champ.get("variable_exacte")
-            question = champ.get("label_joli", var_nom)
-            var_type = champ.get("type", "text")
+            var = champ.get("variable_exacte")
+            question = champ.get("label_joli", var)
+            v_type = champ.get("type", "text")
             
-            if var_type == "number":
-                reponses_utilisateur[var_nom] = st.number_input(question, value=0)
-            elif var_type == "date":
-                reponses_utilisateur[var_nom] = st.text_input(question, placeholder="JJ/MM/AAAA")
+            if v_type == "number":
+                reponses[var] = st.number_input(question, value=0)
+            elif v_type == "date":
+                reponses[var] = st.text_input(question, placeholder="JJ/MM/AAAA")
             else:
-                reponses_utilisateur[var_nom] = st.text_input(question)
+                reponses[var] = st.text_input(question)
                 
-        bouton_generer = st.form_submit_button("✨ Créer mon Contrat")
+        bouton_generer = st.form_submit_button("✨ Générer le Contrat")
 
-    # Génération du document final
+    # --- 5. GÉNÉRATION FINALE ---
     if bouton_generer:
-        with st.spinner("Génération du document avec formatage d'origine..."):
-            doc.render(reponses_utilisateur)
-            
+        with st.spinner("Création du document final..."):
+            doc.render(reponses)
             fichier_final = io.BytesIO()
             doc.save(fichier_final)
             fichier_final.seek(0)
             
-            st.success("🎉 Votre contrat est prêt ! La mise en page a été conservée.")
+            st.success("🎉 Contrat prêt ! La mise en page est conservée.")
             st.download_button(
-                label="📥 Télécharger le Contrat (Word)",
+                label="📥 Télécharger le Contrat Rempli (.docx)",
                 data=fichier_final,
-                file_name="Contrat_Genere.docx",
+                file_name="Nouveau_Contrat.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
