@@ -1,3 +1,4 @@
 streamlit
 docxtpl
 openai
+pdf2docx
