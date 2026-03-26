@@ -7,86 +7,98 @@ import tempfile
 from openai import OpenAI
 from pdf2docx import Converter
 
-# --- 1. CONFIGURATION ---
-st.set_page_config(page_title="ContractAI Premium", page_icon="⚖️", layout="wide")
-st.title("⚖️ Générateur de Contrats Intelligent")
-st.markdown("Sans balises complexes • Avec Tableaux Dynamiques • Règles Logiques IA")
+st.set_page_config(page_title="ContractAI Surlignage", page_icon="🖍️", layout="wide")
+st.title("🖍️ Générateur de Contrats (Par Surlignage)")
+st.markdown("Surlignez vos mots dans Word • Remplissage automatique • Tableau interactif")
 
 API_KEY = os.environ.get("OPENAI_API_KEY")
 if not API_KEY:
     st.error("🚨 Erreur : La clé API OpenAI n'est pas configurée sur Railway.")
     st.stop()
 
-# --- 2. FONCTION IA (Le Cerveau Logique) ---
-def deduire_responsable_avec_ia(montant, regle):
-    """L'IA lit la règle et le montant, et retourne juste le nom du responsable"""
+# --- FONCTIONS ---
+def extraire_mots_surlignes(chemin_fichier):
+    """Parcourt tout le document et extrait les mots surlignés en jaune/autre couleur"""
+    doc = Document(chemin_fichier)
+    mots_trouves =[]
+    
+    def lire_paragraphe(p):
+        for r in p.runs:
+            # Si le texte a une couleur de surlignage et n'est pas vide
+            if r.font.highlight_color is not None and r.text.strip():
+                mots_trouves.append(r.text.strip())
+                
+    for p in doc.paragraphs:
+        lire_paragraphe(p)
+        
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    lire_paragraphe(p)
+                    
+    return list(set(mots_trouves)) # set() permet d'enlever les doublons
+
+def deduire_responsable(montant, regle):
     client = OpenAI(api_key=API_KEY)
-    prompt = f"""
-    Voici la règle de l'entreprise : "{regle}"
-    Le montant total du contrat actuel est de {montant} €.
-    En te basant strictement sur la règle, qui doit être le responsable/signataire de ce contrat ?
-    Réponds UNIQUEMENT par le prénom et nom de la personne, sans aucune phrase autour.
-    """
-    response = client.chat.completions.create(
+    prompt = f"Règle: '{regle}'. Le montant est de {montant}€. Qui est le responsable ? Réponds UNIQUEMENT par le nom de la personne."
+    res = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}]
     )
-    return response.choices[0].message.content.strip()
+    return res.choices[0].message.content.strip()
 
-# --- 3. FONCTION DE MODIFICATION WORD (La Magie) ---
-def modifier_document(chemin_fichier, remplacements, df_tableau):
+def modifier_document(chemin_fichier, reponses_formulaire, df_tableau, mot_cle_responsable, nom_ia):
     doc = Document(chemin_fichier)
     
-    # A. Remplacer le texte partout (paragraphes normaux)
-    for para in doc.paragraphs:
-        for ancien, nouveau in remplacements.items():
-            if ancien in para.text:
-                para.text = para.text.replace(ancien, str(nouveau))
-                
-    # B. Parcourir les tableaux pour remplacer le texte ET gérer le tableau dynamique
-    for table in doc.tables:
-        if len(table.rows) > 0:
-            # On lit la première ligne pour voir si c'est notre tableau de prestations
-            en_tetes = [cell.text.strip().lower() for cell in table.rows[0].cells]
-            
-            if "description" in en_tetes and "channel" in en_tetes and "date" in en_tetes:
-                # BINGO ! C'est le tableau dynamique. 
-                # On sauvegarde la ligne d'exemple (pour la supprimer après)
-                ligne_exemple = table.rows[1] if len(table.rows) > 1 else None
-                
-                # On ajoute les nouvelles lignes venant du site web
-                for index, ligne_donnees in df_tableau.iterrows():
-                    nouvelle_ligne = table.add_row()
-                    nouvelle_ligne.cells[0].text = str(ligne_donnees.get("Description", ""))
-                    nouvelle_ligne.cells[1].text = str(ligne_donnees.get("Channel", ""))
-                    nouvelle_ligne.cells[2].text = str(ligne_donnees.get("Date", ""))
-                
-                # On supprime la ligne d'exemple d'origine du modèle
-                if ligne_exemple:
-                    table._tbl.remove(ligne_exemple._tr)
-            else:
-                # Si c'est un tableau normal, on fait juste du Chercher/Remplacer de texte
-                for row in table.rows:
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            for ancien, nouveau in remplacements.items():
-                                if ancien in para.text:
-                                    para.text = para.text.replace(ancien, str(nouveau))
-    
-    # Sauvegarder en mémoire
-    fichier_final = io.BytesIO()
-    doc.save(fichier_final)
-    fichier_final.seek(0)
-    return fichier_final
+    # On force la réponse du responsable avec celle trouvée par l'IA
+    if mot_cle_responsable in reponses_formulaire:
+        reponses_formulaire[mot_cle_responsable] = nom_ia
 
-# --- 4. INTERFACE UTILISATEUR ---
-st.markdown("### 📂 Étape 1 : Importez votre modèle (PDF ou Word)")
-fichier_upload = st.file_uploader("Le document ne nécessite aucune balise de code.", type=["docx", "pdf"])
+    def remplacer_paragraphe(p):
+        for r in p.runs:
+            if r.font.highlight_color is not None:
+                texte_original = r.text.strip()
+                if texte_original in reponses_formulaire:
+                    r.text = str(reponses_formulaire[texte_original])
+                    r.font.highlight_color = None # Enlève le surlignage !
+
+    for p in doc.paragraphs:
+        remplacer_paragraphe(p)
+        
+    for table in doc.tables:
+        # On repère le tableau dynamique s'il a exactement 3 colonnes !
+        if len(table.columns) == 3 and len(table.rows) > 0:
+            ligne_exemple = table.rows[1] if len(table.rows) > 1 else None
+            
+            # Ajout des lignes du site web
+            for index, row_data in df_tableau.iterrows():
+                new_row = table.add_row()
+                new_row.cells[0].text = str(row_data.iloc[0])
+                new_row.cells[1].text = str(row_data.iloc[1])
+                new_row.cells[2].text = str(row_data.iloc[2])
+                
+            # Suppression de la ligne d'exemple surlignée du modèle
+            if ligne_exemple:
+                table._tbl.remove(ligne_exemple._tr)
+        else:
+            # Si c'est un tableau normal, on remplace juste le fluo
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        remplacer_paragraphe(p)
+                        
+    out = io.BytesIO()
+    doc.save(out)
+    out.seek(0)
+    return out
+
+# --- INTERFACE ---
+fichier_upload = st.file_uploader("📂 Glissez votre contrat (avec vos mots surlignés)", type=["docx", "pdf"])
 
 if fichier_upload is not None:
-    # --- CONVERSION PDF SI BESOIN ---
     chemin_travail = ""
-    with st.spinner("Préparation du document..."):
+    with st.spinner("Lecture du fichier..."):
         if fichier_upload.name.endswith('.pdf'):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                 tmp_pdf.write(fichier_upload.read())
@@ -101,60 +113,43 @@ if fichier_upload is not None:
                 tmp_docx.write(fichier_upload.read())
                 chemin_travail = tmp_docx.name
 
-    st.success("Document prêt ! Remplissez les données ci-dessous.")
+    mots_surlignes = extraire_mots_surlignes(chemin_travail)
+    
+    if not mots_surlignes:
+        st.error("❌ Aucun texte surligné trouvé. Ouvrez votre Word, sélectionnez un mot, et mettez-le en surbrillance jaune.")
+        st.stop()
 
     col1, col2 = st.columns(2)
     
-    # --- COLONNE 1 : LOGIQUE ET VARIABLES ---
     with col1:
-        st.markdown("### 🧠 Logique et Variables")
-        st.info("Dites au programme quel texte remplacer dans votre modèle.")
-        ancien_client = st.text_input("Texte du client à remplacer (ex: 'NOM_CLIENT') :", "NOM_CLIENT")
-        nouveau_client = st.text_input("Nouveau nom du client :", "")
+        st.markdown("### 📝 Remplissez les champs trouvés")
+        st.success(f"{len(mots_surlignes)} éléments surlignés détectés !")
         
-        ancien_responsable = st.text_input("Texte du responsable à remplacer (ex: 'SIGNATAIRE') :", "SIGNATAIRE")
-        
-        st.markdown("#### ⚙️ Règle automatique (Montant)")
-        montant_total = st.number_input("Montant total du contrat (€) :", value=0)
-        regle_ia = st.text_area("Règle d'attribution :", value="Si le montant dépasse 10000€, la responsable est Mme Dubois. Sinon, le responsable est M. Martin.")
+        reponses = {}
+        for mot in mots_surlignes:
+            reponses[mot] = st.text_input(f"Remplacer '{mot}' par :", value=mot)
+            
+        st.markdown("---")
+        st.markdown("### 🧠 Logique du Responsable")
+        mot_responsable = st.selectbox("Parmi ces mots fluos, lequel désigne le Responsable ?", options=["Aucun"] + mots_surlignes)
+        montant = st.number_input("Montant total du contrat (€) :", value=0)
+        regle = st.text_area("Règle (ex: Si > 10000€, c'est Mme Dubois, sinon M. Martin)", value="Si le montant dépasse 10000€, c'est Mme Dubois. Sinon c'est M. Martin.")
 
-    # --- COLONNE 2 : LE TABLEAU DYNAMIQUE ---
     with col2:
-        st.markdown("### 📋 Tableau des Prestations")
-        st.write("Ajoutez ou supprimez des lignes. Elles seront injectées dans le Word.")
-        
-        # Création du tableau interactif
-        donnees_depart = pd.DataFrame([{"Description": "", "Channel": "", "Date": ""}])
-        
-        tableau_interactif = st.data_editor(
-            donnees_depart,
-            num_rows="dynamic", # Permet d'ajouter/supprimer des lignes (Le bouton +)
-            use_container_width=True
-        )
+        st.markdown("### 📋 Tableau de Prestations")
+        st.info("Ajoutez des lignes. Elles rempliront le tableau de 3 colonnes de votre contrat.")
+        df_base = pd.DataFrame([{"Description": "", "Channel": "", "Date": ""}])
+        tableau_web = st.data_editor(df_base, num_rows="dynamic", use_container_width=True)
 
-    # --- BOUTON DE GÉNÉRATION ---
-    st.markdown("---")
-    if st.button("✨ Analyser et Générer le Contrat Final", use_container_width=True):
-        
-        with st.spinner("🤖 L'IA réfléchit au responsable..."):
-            responsable_trouve = deduire_responsable_avec_ia(montant_total, regle_ia)
-            st.success(f"L'IA a déduit que le responsable est : **{responsable_trouve}**")
+    if st.button("✨ Générer le Contrat Final", use_container_width=True):
+        with st.spinner("L'IA applique la règle et crée le Word..."):
             
-        with st.spinner("📝 Création du contrat et des tableaux..."):
-            # Dictionnaire des mots à chercher / remplacer
-            mots_a_remplacer = {
-                ancien_client: nouveau_client,
-                ancien_responsable: responsable_trouve,
-                "MONTANT_TOTAL": f"{montant_total} €" # On peut ajouter autant de variables que l'on veut
-            }
-            
-            # Lancement de la modification
-            document_final = modifier_document(chemin_travail, mots_a_remplacer, tableau_interactif)
+            nom_responsable = ""
+            if mot_responsable != "Aucun":
+                nom_responsable = deduire_responsable(montant, regle)
+                st.info(f"💡 L'IA a déduit que le responsable est : {nom_responsable}")
+                
+            doc_final = modifier_document(chemin_travail, reponses, tableau_web, mot_responsable, nom_responsable)
             
             st.balloons()
-            st.download_button(
-                label="📥 TÉLÉCHARGER LE CONTRAT FINAL (.docx)",
-                data=document_final,
-                file_name=f"Contrat_{nouveau_client}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            st.download_button("📥 TÉLÉCHARGER LE CONTRAT (.docx)", data=doc_final, file_name="Contrat_Final.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
